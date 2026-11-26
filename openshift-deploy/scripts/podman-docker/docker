@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Stands in for docker when only podman is installed. Handles `docker info`
+# and the one buildx form ate-setup runs for Dockerfile images:
+#   docker buildx build --platform=P --push --metadata-file F [flags] -t TAG CTX
+# podman builds inside its VM on macOS, where localhost:5001 (the kind-registry
+# port-forward) is unreachable, so the image is saved and pushed from the host
+# with crane. The metadata file gets the pushed digest, as buildx writes it.
+set -o errexit -o nounset -o pipefail
+
+case "${1:-}" in
+  info) exec podman info ;;
+  buildx) shift ;;
+  *) exec podman "$@" ;;
+esac
+if [[ "${1:-}" != build ]]; then
+  echo "podman-docker: unsupported: docker buildx $*" >&2
+  exit 1
+fi
+shift
+
+platform=linux/amd64 metadata="" tag="" context="" extra=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --platform=*) platform="${1#*=}" ;;
+    --push) ;;
+    --metadata-file) metadata="$2"; shift ;;
+    -t) tag="$2"; shift ;;
+    -*) extra+=("$1") ;;
+    *) context="$1" ;;
+  esac
+  shift
+done
+if [[ -z "${tag}" || -z "${context}" ]]; then
+  echo "podman-docker: need -t TAG and a build context" >&2
+  exit 1
+fi
+
+podman build --platform "${platform}" ${extra[@]+"${extra[@]}"} -t "${tag}" "${context}"
+
+archive="$(mktemp -t ate-image).tar"
+trap 'rm -f "${archive}"' EXIT
+podman save --format docker-archive -o "${archive}" "${tag}"
+registry="${tag%%/*}"
+ref=""
+for attempt in 1 2 3; do
+  for _ in $(seq 30); do
+    curl -sf "http://${registry}/v2/" >/dev/null && break
+    sleep 1
+  done
+  if ref="$(cd /tmp && go run github.com/google/go-containerregistry/cmd/crane@v0.22.1 push "${archive}" "${tag}")"; then
+    break
+  fi
+  echo "podman-docker: push attempt ${attempt} failed" >&2
+  ref=""
+done
+if [[ -z "${ref}" ]]; then
+  echo "podman-docker: could not push ${tag}" >&2
+  exit 1
+fi
+echo "pushed ${ref}" >&2
+
+if [[ -n "${metadata}" ]]; then
+  printf '{"containerimage.digest":"%s"}\n' "${ref##*@}" > "${metadata}"
+fi

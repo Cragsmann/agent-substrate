@@ -134,6 +134,21 @@ curl -X POST http://localhost:8000/                             # 4 → state su
 
 The template sets no idle timeout, so the actor doesn't suspend on its own. Suspend it explicitly as above.
 
+### 8. Optional: claude-code-multiplex demo ([08](scripts/08-claude-multiplex.sh))
+
+Three Claude Code agents share a two-pod WorkerPool. A local dashboard resumes an agent when it gets a task and suspends it when the task ends. The agents reach `api.anthropic.com` through `atenet-egress` under a per-actor egress policy.
+
+```bash
+export ANTHROPIC_API_KEY=...        # in your shell; the deploy writes it into the actor templates
+scripts/08-claude-multiplex.sh    # deploys, then opens the dashboard on the first free port from 8091
+```
+
+The installer builds the agent image with `docker buildx`. With only podman installed, [scripts/podman-docker/docker](scripts/podman-docker/docker) stands in for it:
+
+- It runs `podman build` for linux/amd64.
+- On macOS, podman builds inside its VM, which can't reach the `localhost:5001` port-forward. So the wrapper saves the image and pushes it from the host with `crane`.
+- It then writes the digest file that buildx would have written.
+
 ## What changes on the cluster
 
 - Namespaces `ate-system`, `otel-system`, `podcertificate-controller-system` and `ate-demo-counter`, labeled for the privileged Pod Security level.

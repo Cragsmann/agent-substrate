@@ -514,8 +514,11 @@ func handlePods(w http.ResponseWriter, r *http.Request) {
 	}
 	pods := make([]podSummary, 0, len(resp.GetWorkers()))
 	for _, wk := range resp.GetWorkers() {
-		// No demo-namespace filter: a Worker listing does not name the Actors
-		// it holds, so there is no template namespace to compare against.
+		// Skip other pools' workers, such as another demo's: their pods are
+		// not in this namespace, so their logs cannot be read here.
+		if namespace != "" && wk.GetWorkerNamespace() != "" && wk.GetWorkerNamespace() != namespace {
+			continue
+		}
 		ready := wk.GetStatus().GetAllocated().GetActors() > 0
 		pods = append(pods, podSummary{
 			Name:      wk.GetWorkerPod(),

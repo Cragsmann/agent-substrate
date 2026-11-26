@@ -1,0 +1,31 @@
+diff --git a/manifests/ate-install/ate-api-server.yaml b/manifests/ate-install/ate-api-server.yaml
+index 2d55f435..056a83c3 100644
+--- a/manifests/ate-install/ate-api-server.yaml
++++ b/manifests/ate-install/ate-api-server.yaml
+@@ -89,6 +89,11 @@ spec:
+       # for ate-api-server, over a Unix socket in a pod-local emptyDir. A native
+       # sidecar starts before ate-api-server and stops after it. ate-api-server
+       # starts only once the startup probe sees the plugin serving.
++      # OpenShift: binding :443 needs this sysctl on OCP 5.1.
++      securityContext:
++        sysctls:
++        - name: net.ipv4.ip_unprivileged_port_start
++          value: "0"
+       initContainers:
+       - name: objectstore-plugin
+         image: ko://go.ate.dev/substrate/cmd/objectstore-plugin
+diff --git a/manifests/ate-install/atelet.yaml b/manifests/ate-install/atelet.yaml
+index 7036665b..09ed4f79 100644
+--- a/manifests/ate-install/atelet.yaml
++++ b/manifests/ate-install/atelet.yaml
+@@ -177,6 +177,10 @@ spec:
+       # A native sidecar (restartPolicy: Always) starts before atelet and stops
+       # after it, so uploads still in flight during atelet's drain finish.
+       # atelet starts only once the startup probe sees the plugin serving.
++      # OpenShift: RHCOS SELinux denies container_t on the /var/lib/ate hostPath.
++      securityContext:
++        seLinuxOptions:
++          type: spc_t
+       initContainers:
+       - name: objectstore-plugin
+         image: ko://go.ate.dev/substrate/cmd/objectstore-plugin

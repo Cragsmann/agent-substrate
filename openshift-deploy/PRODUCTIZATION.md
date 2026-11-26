@@ -21,7 +21,7 @@ It builds on two sources:
 6. disconnected installation, FIPS, monitoring and console integration
 7. continuous testing on OpenShift
 
-**The one big decision is the sandbox runtime.** Substrate isolates each actor with gVisor or with microVMs. Red Hat does not ship or support gVisor today. Choosing it means taking on a new runtime. The alternative is to build on OpenShift sandboxed containers (Kata), which Red Hat already supports, but which needs nodes with hardware virtualization.
+**The one big decision is the sandbox runtime.** Substrate isolates each actor with gVisor or with microVMs. MicroVMs need hardware virtualization (`/dev/kvm`), which means bare-metal nodes, or VMs with nested virtualization, which cloud providers offer only on some instance types and often not by default. gVisor runs on any node, so it fits every OpenShift cluster. Red Hat does not ship or support gVisor today, so choosing it means taking on a new runtime. The recommendation is to lead with gVisor everywhere, and to offer microVMs on nodes that expose KVM, whether bare metal or VMs with nested virtualization enabled.
 
 **Minimum version: OpenShift 5.1 (Kubernetes 1.37).** Substrate uses two Kubernetes APIs, PodCertificateRequest and ClusterTrustBundle, for every component's identity. Both were on by default on the 1.37 clusters tested and absent on a 4.22 cluster (Kubernetes 1.35). On older releases they can only be enabled through the `CustomNoUpgrade` feature set, which blocks upgrades and is unsupported. That route was not tested, so older releases are treated as out of scope.
 
@@ -60,9 +60,11 @@ Today the gVisor binary is downloaded at runtime from a public Google Cloud buck
 1. **Support gVisor.** Build it in Red Hat's pipeline, ship it as a signed artifact, and own its security fixes and its compatibility with each RHCOS kernel. This keeps Substrate's design, but it is a large new support commitment.
 2. **Build on OpenShift sandboxed containers (Kata).** Red Hat already supports Kata.
    - **Fit is unproven.** Upstream's microVM option runs its own Cloud Hypervisor with guest files downloaded from GitHub, and depends on that hypervisor's snapshot and restore. Whether Kata's supported stack can provide the same suspend and resume is an open question to evaluate first.
-   - **Needs hardware virtualization.** It needs nodes with `/dev/kvm`, which usually means bare metal. None of the cloud VMs tested had it.
+   - **Needs hardware virtualization.** It needs nodes with `/dev/kvm`: bare metal, or VMs with nested virtualization. None of the cloud VMs tested (AWS m6i, GCP n1) had it, and most OpenShift clusters run on VMs like these.
    - **Untested on OpenShift.** The microVM path has not been run there yet, and more SELinux work is expected.
-3. **Offer both:** gVisor where density matters, microVMs where hardware allows.
+3. **Offer both:** gVisor everywhere, microVMs where hardware allows.
+
+**Recommendation.** Offer both (option 3), with gVisor as the default. gVisor runs on any node type. MicroVMs give stronger isolation through a separate kernel, and can run wherever nodes expose KVM: bare-metal clusters, and cloud VMs with nested virtualization enabled. Test nested virtualization on the cloud instance types customers use, since it is slower than bare metal and not every provider supports it.
 
 **Also resolve.** An earlier spike saw files written inside a gVisor sandbox fail to read back. The later demo runs did not hit it, but the cause has not been found. It needs an answer before release.
 
@@ -79,6 +81,7 @@ Today the gVisor binary is downloaded at runtime from a public Google Cloud buck
 - **Close the image-policy gap.** atelet downloads actor images itself instead of asking CRI-O. As a result, the cluster's image signature checks, registry mirrors and allowed-registry lists do not apply to actor images. That is both a security and a compliance problem.
 - **Support FIPS mode.** Build with Red Hat's FIPS-capable Go toolchain and test on FIPS clusters. This includes the Envoy and Rust parts.
 - **Review the threat model for OpenShift.** Upstream has one (`docs/security/threat-model.md`). Check it against the OpenShift setup: root workers with host access under the chosen SELinux policy, multiple tenants, the egress TLS interception CA, and the shared bootstrap admin account the installer warns about.
+- **Get security sign-off on root workers.** Workers run as root with access to a host directory. Even with an SELinux module and minimal SCCs, this design needs a formal security review before release.
 
 ### 3. Installation and lifecycle (P0, L)
 
@@ -93,6 +96,7 @@ Today the gVisor binary is downloaded at runtime from a public Google Cloud buck
 - **Decide which topologies to support:** standard clusters, compact clusters, single-node OpenShift, Hosted Control Planes, ROSA and ARO.
   - Hosted and managed clusters restrict node-level changes such as MachineConfigs, which an SELinux module or kernel settings may need.
   - Single-node clusters have little room for worker pools next to the control plane.
+  - None of these topologies except standard clusters has been tested yet.
 - **Keep the CLI** for developers, published as `oc ate`.
 
 ### 4. Builds and supply chain (P0, M)
@@ -103,7 +107,7 @@ Today the gVisor binary is downloaded at runtime from a public Google Cloud buck
 
 - **Rebuild every image on UBI** in Konflux, sign them, publish to `registry.redhat.io`, and attach SBOMs. Today the images use Google distroless, Debian, Alpine, Docker Hub's PostgreSQL and upstream Envoy.
 - **Decide on Envoy.** Substrate's gateways run upstream Envoy with a custom Rust dynamic module. Either build and maintain both, or check whether the Envoy that OpenShift Service Mesh supports can load that module. The agentgateway dataplane is a second upstream option to weigh.
-- **Define architectures.** Upstream builds for amd64 and arm64. gVisor only supports those two, so other architectures would depend on the microVM path.
+- **Define architectures.** Upstream builds for amd64 and arm64. gVisor only supports those two, so other architectures would need the microVM path.
 - **Set the release model:** how closely to follow upstream releases, how to carry patches, and how to issue security errata.
 
 ### 5. Storage and data (P0, M)
@@ -196,14 +200,5 @@ Fixing these upstream keeps the downstream build close to the project.
 | ----------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | 0. Decide               | Agree on scope        | Choose the runtime, supported topologies, user roles and OpenShift versions                                                          |
 | 1. Developer preview    | Safe enough to try    | Operator alpha, minimal permissions and SELinux module, UBI images, S3 or ODF snapshots, upstream changes 1 to 4, tests on OpenShift |
-| 2. Technology preview   | Complete on OpenShift | Disconnected and proxy support, OpenShift login, monitoring, console plugin, upgrade tests, FIPS, microVMs on bare metal if in scope |
+| 2. Technology preview   | Complete on OpenShift | Disconnected and proxy support, OpenShift login, monitoring, console plugin, upgrade tests, FIPS, microVMs on nodes that expose KVM |
 | 3. General availability | Fully supported       | Certified Operator and images, highly available database, backup and restore, scale results, documentation, support training         |
-
-## Risks and open questions
-
-- **Supporting gVisor is a big commitment.** It is a kernel written in user space, and its fixes and RHCOS compatibility would be Red Hat's to own.
-- **Hardware virtualization is rare in the cloud.** A microVM-first product mostly needs bare-metal nodes.
-- **atelet's image pulls skip cluster policy.** Customers with strict image rules may not accept this until it changes.
-- **Workers run as root with host access.** Even with an SELinux module, this needs a security review and sign-off.
-- **Upstream moves fast.** Version 1.0 is recent. Decide how far behind upstream the product may lag.
-- **Several areas are untested on OpenShift:** the gVisor file issue from the spike, microVMs, IPv6, single-node and hosted clusters, and the end-to-end suites.

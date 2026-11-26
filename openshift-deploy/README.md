@@ -43,6 +43,8 @@ scripts/06-deploy-counter.sh     # ate-setup deploy demo counter + per-namespace
 scripts/07-verify-counter.sh     # create actor, increment, suspend, resume, restore timing
 ```
 
+To run all of them in one go, stopping at the first failure: `scripts/deploy-all.sh`.
+
 To remove everything: `scripts/99-cleanup.sh`.
 
 ### 1. Worktree and manifest patch ([01](scripts/01-prepare-worktree.sh), [manifests.patch](manifests.patch))

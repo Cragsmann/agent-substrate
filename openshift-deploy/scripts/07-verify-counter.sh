@@ -12,10 +12,19 @@ k="${WORKTREE}/bin/kubectl-ate"
 "${k}" get actor "${actor}" -a "${ns}" >/dev/null 2>&1 ||
   "${k}" create actor "${actor}" -a "${ns}" --template counter
 
-"${k}" proxy actor "${actor}" -a "${ns}" >/tmp/ate-proxy.log 2>&1 &
+proxy_log="$(mktemp -t ate-proxy)"
+"${k}" proxy actor "${actor}" -a "${ns}" >"${proxy_log}" 2>&1 &
 proxy=$!
-trap 'kill "${proxy}" 2>/dev/null || true' EXIT
-until grep -q '^Proxying' /tmp/ate-proxy.log 2>/dev/null; do sleep 1; done
+trap 'kill "${proxy}" 2>/dev/null || true; rm -f "${proxy_log}"' EXIT
+until grep -q '^Proxying' "${proxy_log}" 2>/dev/null; do
+  if ! kill -0 "${proxy}" 2>/dev/null; then
+    echo "kubectl ate proxy exited:" >&2
+    cat "${proxy_log}" >&2
+    echo "Is something else on localhost:8000? lsof -nP -iTCP:8000 -sTCP:LISTEN" >&2
+    exit 1
+  fi
+  sleep 1
+done
 
 post() { curl -s -m 30 -X POST -w ' [%{http_code} %{time_total}s]\n' http://localhost:8000/; }
 

@@ -1,203 +1,167 @@
 # Agent Substrate on OpenShift: path to a supported product
 
-This document describes what it would take to turn Agent Substrate into a stable, supported Red Hat product on OpenShift.
+What it would take to make Agent Substrate a supported Red Hat product on OpenShift.
 
-It builds on two sources:
+Sources:
 
-- **Demo Installation on Openshift 5.1** Installation of upstream `v1.0.1` on two OpenShift 5.1 clusters (on GCP and AWS) and running the demos. The steps are in [README.md](README.md).
-- **The upstream code.**
+- **Demo installs on OpenShift 5.1.** Upstream `v1.0.1` on three clusters: gVisor on GCP and AWS, and the microVM class on a GCP cluster with nested virtualization. Steps are in [README.md](README.md).
+- **The upstream code:** installer, manifests and components of `v1.0.1`.
 
 ## At a glance
 
-**Substrate already works on OpenShift.** The control plane installed, gVisor sandboxes ran, actors suspended and resumed in 85 to 200 ms, and three AI agents took turns on two worker pods. The egress gateway let the agents' traffic through to `api.anthropic.com`. The calls were rejected because the key used belongs to Red Hat's model gateway (MaaS), and the demo only knows the public Anthropic endpoint. A successful model reply from inside a sandbox has not been confirmed yet. No architectural blocker was found.
+**Substrate works on OpenShift today.** The control plane installed, actors suspended and resumed in 85 to 200 ms with gVisor and 147.5 ms with microVMs, and three AI agents shared two worker pods. No architectural blocker was found.
 
-**What is missing is the product around it.** To be supportable, Substrate needs:
+**The product around it is missing:**
 
 1. a supported sandbox runtime
 2. least-privilege security instead of `privileged` containers
-3. an OpenShift Operator instead of a command-line installer
-4. Red Hat-built and signed images
-5. supported snapshot storage and a supported database
-6. disconnected installation, FIPS, monitoring and console integration
+3. an Operator instead of a command-line installer
+4. Red Hat-built, signed images
+5. supported snapshot storage and database
+6. disconnected installs, FIPS, monitoring and console integration
 7. continuous testing on OpenShift
 
-**The one big decision is the sandbox runtime.** Substrate isolates each actor with gVisor or with microVMs. MicroVMs need hardware virtualization (`/dev/kvm`), which means bare-metal nodes, or VMs with nested virtualization, which cloud providers offer only on some instance types and often not by default. gVisor runs on any node, so it fits every OpenShift cluster. Red Hat does not ship or support gVisor today, so choosing it means taking on a new runtime. The recommendation is to lead with gVisor everywhere, and to offer microVMs on nodes that expose KVM, whether bare metal or VMs with nested virtualization enabled.
+**The big decision is the sandbox runtime.** Red Hat does not support gVisor, and the microVM class does not use Red Hat's Kata build. The recommendation is to test Substrate's workers under Kata first (section 1).
 
-**Minimum version: OpenShift 5.1 (Kubernetes 1.37).** Substrate uses two Kubernetes APIs, PodCertificateRequest and ClusterTrustBundle, for every component's identity. Both were on by default on the 1.37 clusters tested and absent on a 4.22 cluster (Kubernetes 1.35). On older releases they can only be enabled through the `CustomNoUpgrade` feature set, which blocks upgrades and is unsupported. That route was not tested, so older releases are treated as out of scope.
+**Minimum version: OpenShift 5.1 (Kubernetes 1.37).** Substrate needs the PodCertificateRequest and ClusterTrustBundle APIs. They were on by default on 1.37 and absent on 4.22. Older releases could only enable them through `CustomNoUpgrade`, which blocks upgrades.
 
 ## What the demo had to work around
 
-Getting the demo running took several shortcuts. Each one marks a gap a product must close.
+Each shortcut marks a gap a product must close.
 
-| Shortcut in the demo                                                                                           | Why it was needed                                                                                                                                                                                                                                              | What a product needs                                                                              |
-| -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Installed with the `--kind` profile, meant for laptops                                                         | The other profile requires Google Cloud                                                                                                                                                                                                                        | An OpenShift install profile, delivered by an Operator                                            |
-| Gave every service account in two namespaces the `anyuid` permission                                           | Some components insist on a fixed user ID                                                                                                                                                                                                                      | Remove the fixed IDs upstream, or ship narrow permissions                                         |
-| Granted the node agent (atelet) the `privileged` SCC, and ran it with SELinux confinement turned off (`spc_t`) | It runs as root with host directories and four added capabilities, and shares `/var/lib/ate` with workers in other namespaces                                                                                                                                  | A dedicated, minimal permission set plus an SELinux policy module                                 |
-| Admitted worker pods with a copy of the `privileged` SCC that forces `spc_t`                                   | gVisor workers run as root with nine added capabilities, a host directory, and no seccomp profile, and remount cgroups                                                                                                                                         | A minimal permission set plus an SELinux policy module                                            |
-| Set `ip_unprivileged_port_start=0` on the API server and worker pods                                           | They listen on port 443. The worker has no `NET_BIND_SERVICE` capability and relies on the runtime allowing low ports, which containerd does by default and CRI-O does not. The earlier spike found the API server could not bind 443 even with the capability | Upstream sets the value, or uses a port above 1024. Whether the worker needs it was not confirmed |
-| Labeled and granted permissions to each demo namespace by script                                               | Every new worker namespace needs them                                                                                                                                                                                                                          | The Operator manages this automatically                                                           |
-| Stored snapshots in rustfs, a single 1 GiB pod with fixed passwords                                            | It was the only storage option without cloud setup                                                                                                                                                                                                             | Cloud object storage or OpenShift Data Foundation                                                 |
-| Ran PostgreSQL from a Docker Hub image, single instance                                                        | It is what the installer bundles                                                                                                                                                                                                                               | A supported PostgreSQL with high availability and backups                                         |
-| Served actor images from a plain HTTP registry                                                                 | atelet pulls actor images itself, not through CRI-O. Its credential support expects a GKE-style kubelet plugin, so on OpenShift it pulls anonymously                                                                                                           | atelet uses the cluster's pull secret, mirrors and CAs                                            |
-| Built images on a laptop with ko and Podman                                                                    | Developer tooling                                                                                                                                                                                                                                              | Builds in Red Hat's pipeline (Konflux)                                                            |
+| Shortcut | Why | Product needs |
+|---|---|---|
+| `--kind` install profile | The other profile requires Google Cloud | An Operator |
+| `anyuid` for all service accounts in two namespaces | Some components pin a user ID | Unpinned IDs or narrow SCCs |
+| `privileged` SCC and `spc_t` for atelet | Root, host directories, four added capabilities | Minimal SCC plus an SELinux module |
+| A `privileged` copy that forces `spc_t` for workers | Root, nine added capabilities, a host directory, no seccomp, cgroup remounts | Minimal SCC plus an SELinux module |
+| `ip_unprivileged_port_start=0` on API server and workers | They bind port 443, which CRI-O blocks. Confirmed for the API server only | Upstream sets it |
+| Namespace labels and SCC bindings by script | Every worker namespace needs them | The Operator does it |
+| rustfs for snapshots (1 GiB, fixed passwords) | Only option without cloud setup | Object storage or OpenShift Data Foundation |
+| Single PostgreSQL from Docker Hub | The installer bundles it | Supported PostgreSQL with HA and backups |
+| Plain HTTP registry for actor images | atelet pulls images itself, anonymously on OpenShift | atelet uses the cluster's pull secret, mirrors and CAs |
+| Images built on a laptop | Developer tooling | Konflux builds |
+| microVM files staged with a `docker` stand-in and a policy exception | The installer's staging assumes kind | The Operator stages them in-cluster |
 
 ## Work areas
 
-Each area lists why it matters and what to do.
-
-- **Priority:** P0 blocks a supported release. P1 is needed before general availability. P2 can follow.
-- **Effort:** relative, not an estimate. S is days, M is weeks, L is a quarter or more.
+Priority: P0 blocks release, P1 is needed for GA, P2 can follow. Effort: S is days, M is weeks, L is a quarter or more.
 
 ### 1. Sandbox runtime (P0, L)
 
-**Why it matters.** The runtime is the security boundary between untrusted actors. Red Hat must be able to build it, patch it and stand behind it.
+The runtime is the boundary between untrusted actors, such as agents running generated code. Without a runtime Red Hat can build and patch, there is no supported product.
 
-Today the gVisor binary is downloaded at runtime from a public Google Cloud bucket (`gs://gvisor`). A product cannot depend on that. The download URL is set in the `SandboxConfig` resource, so a downstream build can host its own signed copy and point the URL there without an upstream change.
+**Today.** Substrate starts the sandbox inside the worker pod, not through a RuntimeClass, so CRI-O and OpenShift sandboxed containers are not involved.
 
-**Options.**
+- **gVisor** runs on any node, including cloud VMs without KVM (AWS m6i, GCP n1). Red Hat does not support it. `runsc` is downloaded from Google's `gs://gvisor` bucket, but the URL is set in `SandboxConfig`, so a downstream build can host its own copy.
+- **microVMs** need `/dev/kvm`: bare metal, or nested virtualization, which clouds offer only on some instance types. They use upstream Kata 4.3.1 parts (guest kernel, image, `kata-agent`, `virtiofsd`) on Cloud Hypervisor, driven by Substrate's worker, not Red Hat's Kata build. They ran on GCP nested virtualization, but only under `spc_t`, so the SELinux module must also cover `/dev/kvm` and `virtiofsd`. Bare metal is untested.
 
-1. **Support gVisor.** Build it in Red Hat's pipeline, ship it as a signed artifact, and own its security fixes and its compatibility with each RHCOS kernel. This keeps Substrate's design, but it is a large new support commitment.
-2. **Build on OpenShift sandboxed containers (Kata).** Red Hat already supports Kata.
-   - **Fit is unproven.** Upstream's microVM option runs its own Cloud Hypervisor with guest files downloaded from GitHub, and depends on that hypervisor's snapshot and restore. Whether Kata's supported stack can provide the same suspend and resume is an open question to evaluate first.
-   - **Needs hardware virtualization.** It needs nodes with `/dev/kvm`: bare metal, or VMs with nested virtualization. None of the cloud VMs tested (AWS m6i, GCP n1) had it, and most OpenShift clusters run on VMs like these.
-   - **Untested on OpenShift.** The microVM path has not been run there yet, and more SELinux work is expected.
-3. **Offer both:** gVisor everywhere, microVMs where hardware allows.
+**Overlap with Agent Sandbox.** The Red Hat build of Agent Sandbox (OpenShift 5 tech preview) already isolates with Kata. Substrate cannot use it yet: WorkerPools have no `runtimeClassName`.
 
-**Recommendation.** Offer both (option 3), with gVisor as the default. gVisor runs on any node type. MicroVMs give stronger isolation through a separate kernel, and can run wherever nodes expose KVM: bare-metal clusters, and cloud VMs with nested virtualization enabled. Test nested virtualization on the cloud instance types customers use, since it is slower than bare metal and not every provider supports it.
+| Option | What it means | Main risk |
+|---|---|---|
+| A. Productize gVisor | Build, sign and patch `runsc`; test it on every RHCOS kernel | A new runtime to own |
+| B. Kata as the outer boundary | Run worker pods under Kata, gVisor inside optional | Needs `runtimeClassName` and KVM. Host directory, root workers and checkpoints are untested inside Kata |
+| C. Red Hat's Kata build in the microVM class | Swap upstream Kata parts for Red Hat's | Red Hat's build must support Cloud Hypervisor snapshot and restore. Needs KVM |
+| D. gVisor default, microVMs where KVM exists | A plus the microVM class or C | Two runtimes to own |
 
-**Also resolve.** An earlier spike saw files written inside a gVisor sandbox fail to read back. The later demo runs did not hit it, but the cause has not been found. It needs an answer before release.
+**Recommendation.** Spike B first, since it reuses a supported runtime and settles the Agent Sandbox overlap: run a WorkerPool under Kata and check suspend and resume. If it works, Kata is the boundary and gVisor is optional. If not, plan for D and budget for owning gVisor.
+
+**Also resolve** a gVisor file write-then-read failure seen in an earlier spike. Later runs did not hit it, and the cause is unknown.
 
 ### 2. Security (P0, M to L)
 
-**Why it matters.** Substrate is built to run untrusted code from many tenants. The demo got there by turning off protections, which is not acceptable in a product.
-
-**What to do.**
-
-- **Ship an SELinux policy module** instead of disabling confinement. It must let workers and atelet share the `/var/lib/ate` host directory across namespaces, and allow the mounts and cgroup changes gVisor makes.
-- **Ship minimal SCCs**, one for atelet and one for workers, and drop `privileged`.
-  - gVisor workers add nine Linux capabilities, including `SYS_ADMIN` and `NET_ADMIN`, and run with seccomp set to `Unconfined`. MicroVM workers add eleven. Upstream documents why each is needed, so the SCC can allow exactly that set.
-  - The AppArmor setting has no effect on RHCOS, which uses SELinux instead.
-- **Close the image-policy gap.** atelet downloads actor images itself instead of asking CRI-O. As a result, the cluster's image signature checks, registry mirrors and allowed-registry lists do not apply to actor images. That is both a security and a compliance problem.
-- **Support FIPS mode.** Build with Red Hat's FIPS-capable Go toolchain and test on FIPS clusters. This includes the Envoy and Rust parts.
-- **Review the threat model for OpenShift.** Upstream has one (`docs/security/threat-model.md`). Check it against the OpenShift setup: root workers with host access under the chosen SELinux policy, multiple tenants, the egress TLS interception CA, and the shared bootstrap admin account the installer warns about.
-- **Get security sign-off on root workers.** Workers run as root with access to a host directory. Even with an SELinux module and minimal SCCs, this design needs a formal security review before release.
+- **SELinux policy module** instead of `spc_t`. It must allow sharing `/var/lib/ate` across namespaces, gVisor's mounts and cgroup changes, and the microVM devices.
+- **Minimal SCCs** for atelet and workers. Upstream documents why each capability is needed (9 for gVisor workers, 11 for microVM). AppArmor settings have no effect on RHCOS.
+- **Image policy.** atelet pulls actor images itself, so the cluster's signature checks, mirrors and allowed registries do not apply. This is a security and compliance gap.
+- **FIPS** builds with Red Hat's Go toolchain, including the Envoy and Rust parts.
+- **Threat model review and security sign-off.** Root workers with host access, multiple tenants, the egress TLS interception CA, and the shared bootstrap admin account.
 
 ### 3. Installation and lifecycle (P0, L)
 
-**Why it matters.** OpenShift customers install and upgrade software through Operators. A command-line installer that a user runs from a laptop is not supportable.
-
-**What to do.**
-
-- **Build an OLM Operator.** Its custom resource can reuse the settings format the installer already reads. It installs and keeps in sync the CRDs, control plane, permissions, network policies, namespace labels and runtime configuration.
-- **Support upgrades and rollbacks.** Upstream already has a version skew policy. Map it to Operator update channels and test every upgrade, including database migrations.
-- **Handle day-two operations:** certificate and signing-key rotation, scaling, and a `must-gather` for support cases.
-- **Support disconnected clusters.** Every image and runtime file must be mirrorable, and the cluster-wide proxy must work.
-- **Decide which topologies to support:** standard clusters, compact clusters, single-node OpenShift, Hosted Control Planes, ROSA and ARO.
-  - Hosted and managed clusters restrict node-level changes such as MachineConfigs, which an SELinux module or kernel settings may need.
-  - Single-node clusters have little room for worker pools next to the control plane.
-  - None of these topologies except standard clusters has been tested yet.
-- **Keep the CLI** for developers, published as `oc ate`.
+- **An OLM Operator** that installs and reconciles CRDs, control plane, permissions, policies, namespace labels and runtime configuration. It can reuse the installer's settings format.
+- **Upgrades and rollbacks** mapped from upstream's version skew policy, including database migrations.
+- **Day two:** certificate and key rotation, scaling, `must-gather`.
+- **Disconnected clusters:** every image and runtime file mirrorable, cluster-wide proxy supported.
+- **Topologies:** decide on compact, single-node, Hosted Control Planes, ROSA and ARO. Only standard clusters are tested. Managed clusters restrict MachineConfigs, which an SELinux module may need.
+- **CLI** for developers as `oc ate`.
 
 ### 4. Builds and supply chain (P0, M)
 
-**Why it matters.** Red Hat products ship Red Hat-built images, with known provenance and timely security fixes.
-
-**What to do.**
-
-- **Rebuild every image on UBI** in Konflux, sign them, publish to `registry.redhat.io`, and attach SBOMs. Today the images use Google distroless, Debian, Alpine, Docker Hub's PostgreSQL and upstream Envoy.
-- **Decide on Envoy.** Substrate's gateways run upstream Envoy with a custom Rust dynamic module. Either build and maintain both, or check whether the Envoy that OpenShift Service Mesh supports can load that module. The agentgateway dataplane is a second upstream option to weigh.
-- **Define architectures.** Upstream builds for amd64 and arm64. gVisor only supports those two, so other architectures would need the microVM path.
-- **Set the release model:** how closely to follow upstream releases, how to carry patches, and how to issue security errata.
+- **UBI images** built in Konflux, signed, on `registry.redhat.io`, with SBOMs. Today's bases are distroless, Debian, Alpine and Docker Hub images.
+- **Envoy:** the gateways use upstream Envoy plus a custom Rust module. Maintain both, check whether OpenShift Service Mesh's Envoy can load the module, or use the agentgateway dataplane.
+- **Architectures:** amd64 and arm64, the only ones gVisor supports.
+- **Release model:** how closely to follow upstream, how to carry patches and errata.
 
 ### 5. Storage and data (P0, M)
 
-**Why it matters.** Snapshots hold each actor's memory and files. Losing them loses customer state.
-
-**What to do.**
-
-- **Support real object storage for snapshots.** The code already supports S3 and Google Cloud Storage. The installer needs to offer S3 directly instead of requiring Google Cloud settings. Integrate OpenShift Data Foundation through object bucket claims, and use short-lived cloud credentials instead of static keys. Remove rustfs.
-- **Define snapshot policy:** retention, cleanup, quotas, encryption at rest and sizing. A memory snapshot can approach the actor's memory size, and the demo agents are allowed 2 GiB each, so the demo's 1 GiB store is only a demo size.
-- **Use a supported database.** Use a Red Hat PostgreSQL image or a supported operator, or let customers bring their own. Define high availability, backup and restore.
-- **Document node disk needs.** Each node keeps images, snapshots and actor data under `/var/lib/ate`.
+- **Object storage for snapshots.** The code supports S3 and GCS, but the installer requires Google Cloud settings. Use OpenShift Data Foundation or cloud storage with short-lived credentials. Remove rustfs.
+- **Snapshot policy:** retention, cleanup, quotas, encryption and sizing. A memory snapshot can approach the actor's memory size.
+- **Supported PostgreSQL** with HA, backup and restore, or customer-provided.
+- **Node disk sizing** for `/var/lib/ate`.
 
 ### 6. Networking (P1, M)
 
-**What to do.**
-
-- **Expose actors outside the cluster** through an OpenShift Route with TLS passthrough, or the Gateway API. The router authenticates clients by mTLS with a pod identity certificate from an allowlist, so TLS must reach it intact. Define how outside users and services get such an identity.
-- **Check the egress gateway** works with the cluster-wide proxy, egress firewalls, admin network policies and corporate CAs.
-- **Test IPv6 and dual stack.** Upstream supports them on kind, but nobody has tested them on OpenShift.
-
-The existing network policies are ingress-only and applied cleanly on OVN-Kubernetes. Whether they block what they should was not tested.
+- **External access** through a Route with TLS passthrough or the Gateway API, since the router authenticates clients by mTLS. Define how outside clients get an identity.
+- **Egress gateway** with the cluster-wide proxy, egress firewalls and corporate CAs.
+- **IPv6 and dual stack** are untested on OpenShift.
+- Existing network policies apply on OVN-Kubernetes. Enforcement was not tested.
 
 ### 7. Model access for agents (P1, S to M)
 
-**Why it matters.** Agents are Substrate's main workload, and most of them call a language model. Red Hat customers will often use a model gateway, such as Red Hat MaaS or models served by OpenShift AI, rather than a public API.
+Customers will reach models through gateways such as Red Hat MaaS or OpenShift AI, not public APIs.
 
-**What was observed.** The claude-code-multiplex demo hardcodes `api.anthropic.com` in two places: the egress policy the installer creates, and the endpoint Claude Code uses by default. A gateway key sent there is rejected. Pointing the agents at a gateway takes two changes: set the endpoint (`ANTHROPIC_BASE_URL`) in the template, and allow the gateway's host in each agent's egress policy. The MaaS gateway speaks the Anthropic API, so no code change is needed in the agent.
-
-**What to do.**
-
-- **Make the model endpoint configurable** in demos and documentation, with OpenShift AI and MaaS as documented targets.
-- **Keep API keys out of templates.** The demo puts the key in the template's environment. That stores it in Substrate's database and inside every snapshot of the agent's memory. Use Substrate's egress credential injection instead. The agent sends a placeholder, and the egress gateway replaces it with the real key on the way out, so the agent never holds it. This needs an `https` egress rule, where the gateway terminates TLS and the agent trusts the gateway's CA, instead of the TLS passthrough the demo uses today.
-- **Write egress policies per model host**, so each agent can reach only the models it is meant to use.
+- **Configurable model endpoint.** The demo hardcodes `api.anthropic.com`, so a MaaS key was rejected. A gateway needs only the endpoint (`ANTHROPIC_BASE_URL`) and an egress rule for its host.
+- **No API keys in templates.** A key in the template is stored in Substrate's database and in every memory snapshot. Use egress credential injection, which adds the key at the gateway. It needs an `https` egress rule, not TLS passthrough.
+- **Egress policies per model host.**
 
 ### 8. Identity and access (P1, M)
 
-**What to do.**
-
-- **Decide on component certificates.** Substrate runs its own certificate authority for internal mTLS. Keep it, or integrate with OpenShift's service CA or cert-manager. Either way, document CA rotation.
-- **Integrate OpenShift login.** By default every CLI user acts as one shared service account, `ate-client`. The API accepts SPIFFE mTLS and OIDC JWTs. OpenShift's built-in OAuth server issues opaque tokens, not JWTs, so it cannot plug in directly. Options are a cluster configured for external OIDC, which issues JWTs, or adding Kubernetes TokenReview support to the API.
-- **Map Substrate's permission model** (atespaces and access policies) to OpenShift projects and roles, so admins manage access in one place.
+- **Component certificates:** keep Substrate's own CA, or use OpenShift's service CA or cert-manager. Document rotation.
+- **OpenShift login.** CLI users share one service account by default. The API accepts mTLS and OIDC JWTs, but OpenShift OAuth tokens are not JWTs. Use external OIDC, or add TokenReview support.
+- **Permissions:** map atespaces and access policies to OpenShift projects and roles.
 
 ### 9. Observability and console (P1, M)
 
-**What to do.**
-
-- **Feed OpenShift monitoring.** Send metrics to user workload monitoring or the Cluster Observability Operator, with dashboards. Upstream's SLO guide (`docs/guides/slos-and-alerts.md`) suggests the alerting rules to start from.
-- **Send traces** to the Red Hat build of OpenTelemetry and Tempo instead of the bundled Jaeger.
-- **Check logs** in OpenShift logging, and drop the Google-specific log fields.
-- **Write a must-gather** that collects resources, actor and worker state, and SELinux denials.
-- **Add a console plugin.** Actors live in Substrate's database, not as Kubernetes objects, so the OpenShift console cannot show them today. A dynamic plugin can show atespaces, actors, templates, pools and snapshots.
+- **Metrics** to OpenShift monitoring, with dashboards and the alerts from upstream's SLO guide.
+- **Traces** to Red Hat's OpenTelemetry and Tempo instead of Jaeger.
+- **Logs** in OpenShift logging, without the Google-specific fields.
+- **must-gather** with actor, worker and SELinux data.
+- **Console plugin.** Actors are not Kubernetes objects, so the console cannot show them today.
 
 ### 10. Testing and certification (P0, M)
 
-**What to do.**
-
-- **Run upstream's end-to-end suites on OpenShift** for every build and every supported OpenShift version. The suites create their own namespaces, which need the same labels and permissions as the demos.
-- **Test upgrades** of both OpenShift and Substrate. RHCOS kernel updates can affect gVisor.
-- **Run scale and soak tests:** many sandboxes per node, constant suspend and resume, node drains. Upstream notes a kernel table limit at about 1000 sandboxes per node.
-- **Certify** the Operator and images, and validate FIPS.
+- **Upstream e2e suites on OpenShift** for every build and supported version.
+- **Upgrade tests** for OpenShift and Substrate. RHCOS kernel updates can affect gVisor.
+- **Scale and soak:** many sandboxes per node (a kernel table limits it near 1000), constant suspend and resume, node drains.
+- **Certification** of the Operator and images, and FIPS validation.
 
 ### 11. Documentation and support (P1, M)
 
-**What to do.**
-
-- Write guides for installation (connected and disconnected), configuration, security choices, storage sizing, upgrades, troubleshooting and alert runbooks.
-- State the support boundaries: runtimes, node types, cloud providers and versions.
-- Train support engineers on actors, snapshots and sandbox debugging.
+Guides for install, configuration, security, sizing, upgrades and troubleshooting. Stated support boundaries. Support training on actors, snapshots and sandboxes.
 
 ## Changes to propose upstream
 
-Fixing these upstream keeps the downstream build close to the project. They are ordered by priority. Downstream-only work, such as the Operator, UBI images and the SELinux module itself, is not listed.
+Ordered by priority. Downstream-only work, such as the Operator and the SELinux module, is not listed.
 
-| Priority | Change                                                                                                                                   | Why                                                                                                                                                                                                                                                          | Effort |
-| -------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ |
-| P0       | Make atelet's GKE image credential settings optional                                                                                     | The default manifest always passes the GKE credential-provider flags and mounts `/etc/srv/kubernetes/cri_auth_config.yaml` with `FileOrCreate`. On any other node that creates an empty file, atelet rejects it and exits. Only the kind overlay avoids this | S      |
-| P0       | Make atelet honor the cluster's image configuration: pull secret, mirrors, trusted CAs and signature policy, or pull through CRI-O       | atelet pulls actor images itself, so disconnected clusters and image policies do not work for actor images                                                                                                                                                   | M to L |
-| P0       | Set `net.ipv4.ip_unprivileged_port_start` on ate-api-server and on the worker pods the controller creates, as atenet-egress already does | They bind port 443, which fails on CRI-O. Confirmed for the API server. Confirm the worker case before proposing that half                                                                                                                                   | S      |
-| P1       | Support SELinux-enforcing nodes without `spc_t`                                                                                          | atelet and workers in different namespaces share `/var/lib/ate`, and workers remount cgroups. Upstream needs to label shared directories consistently and document what a policy module must allow                                                           | M      |
-| P1       | Remove the fixed UID 65532 from atenet-router, atenet-egress and the credential provider                                                 | Fixed UIDs force the `anyuid` SCC. The earlier spike's independent lab run removed these pins and ran the pods under the default `restricted-v2`. PostgreSQL does need its UID and is replaced downstream anyway                                             | S      |
-| P1       | Let the installer use S3 snapshot storage without Google Cloud settings                                                                  | Outside the kind profile the installer hardcodes GCS and requires GCP transfer flags, although the storage plugin already supports S3                                                                                                                        | M      |
-| P1       | Add Kubernetes TokenReview authentication to ate-api-server                                                                              | OpenShift's OAuth tokens are not JWTs, so OpenShift users cannot authenticate as themselves today                                                                                                                                                            | M      |
-| P1       | Add an OpenShift test lane to upstream CI                                                                                                | Catches regressions before they reach downstream                                                                                                                                                                                                             | M      |
+| Priority | Change | Why | Effort |
+|---|---|---|---|
+| P0 | Make atelet's GKE credential settings optional | On non-GKE nodes the default manifest creates an empty config file, and atelet exits | S |
+| P0 | Make atelet honor the cluster's pull secret, mirrors, CAs and signature policy, or pull through CRI-O | Actor images bypass cluster image policy and disconnected setups | M to L |
+| P0 | Set `ip_unprivileged_port_start` on ate-api-server and worker pods | Port 443 fails on CRI-O. Confirm the worker case first | S |
+| P1 | Support SELinux-enforcing nodes without `spc_t` | Consistent labels on shared directories, and documented policy needs | M |
+| P1 | Let WorkerPools set a `runtimeClassName` | Needed for Kata (option B) | S |
+| P1 | Remove the fixed UID 65532 from atenet and the credential provider | Fixed UIDs force `anyuid`. An earlier lab ran them without it | S |
+| P1 | S3 snapshot storage in the installer without Google Cloud settings | The storage plugin already supports S3 | M |
+| P1 | TokenReview authentication in ate-api-server | Lets OpenShift users authenticate as themselves | M |
+| P1 | OpenShift lane in upstream CI | Catches regressions early | M |
+| P2 | microVM file staging outside kind | The installer stages with local docker and for one architecture | S to M |
 
 ## Suggested phases
 
-| Phase                   | Goal                  | Main work                                                                                                                            |
-| ----------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| 0. Decide               | Agree on scope        | Choose the runtime, supported topologies, user roles and OpenShift versions                                                          |
-| 1. Developer preview    | Safe enough to try    | Operator alpha, minimal permissions and SELinux module, UBI images, S3 or ODF snapshots, the P0 upstream changes, tests on OpenShift |
-| 2. Technology preview   | Complete on OpenShift | Disconnected and proxy support, OpenShift login, monitoring, console plugin, upgrade tests, FIPS, microVMs on nodes that expose KVM  |
-| 3. General availability | Fully supported       | Certified Operator and images, highly available database, backup and restore, scale results, documentation, support training         |
+| Phase | Goal | Main work |
+|---|---|---|
+| 0. Decide | Agree on scope | Runtime, topologies, user roles, OpenShift versions |
+| 1. Developer preview | Safe to try | Operator alpha, minimal SCCs and SELinux module, UBI images, S3 or ODF snapshots, P0 upstream changes, OpenShift tests |
+| 2. Technology preview | Complete on OpenShift | Disconnected and proxy, OpenShift login, monitoring, console plugin, upgrade tests, FIPS, microVMs on KVM nodes |
+| 3. General availability | Fully supported | Certified Operator and images, HA database, backup and restore, scale results, docs, support training |
